@@ -1,0 +1,22 @@
+services:
+  kbuild:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    environment:
+      - KERNEL_LTO=${KERNEL_LTO:-thin}
+      - LOCALVERSION=${LOCALVERSION:-}
+    volumes:
+      - kbuild_src:/workspace/kernel
+      - kbuild_out:/workspace/out
+      - kbuild_stage:/workspace/stage
+      - kbuild_dist:/workspace/dist
+    working_dir: /workspace/kernel
+    command: ["/bin/bash", "/workspace/build-kernel-inner.sh"]
+
+volumes:
+  kbuild_src:
+  kbuild_out:
+  kbuild_stage:
+  kbuild_dist:
