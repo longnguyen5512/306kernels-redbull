@@ -118,6 +118,29 @@
 #include <linux/security.h>
 #include <linux/freezer.h>
 #include <linux/file.h>
+#include <linux/cred.h>
+#include <linux/moduleparam.h>
+
+#ifdef CONFIG_KSU_SUSFS
+static unsigned int jdwp_allow_uids[256];
+static int jdwp_allow_uids_count;
+module_param_array(jdwp_allow_uids, uint, &jdwp_allow_uids_count, 0644);
+
+static noinline bool ksu_is_jdwp_allowed_uid(uid_t uid)
+{
+	int count = READ_ONCE(jdwp_allow_uids_count);
+	int i;
+
+	if (count > ARRAY_SIZE(jdwp_allow_uids))
+		count = ARRAY_SIZE(jdwp_allow_uids);
+
+	for (i = 0; i < count; i++) {
+		if (READ_ONCE(jdwp_allow_uids[i]) == uid)
+			return true;
+	}
+	return false;
+}
+#endif
 
 #include "scm.h"
 
@@ -1247,6 +1270,19 @@ static int unix_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 	if (err < 0)
 		goto out;
 	addr_len = err;
+
+#ifdef CONFIG_KSU_SUSFS
+	/* Fast-path: check @jdwp-control first so normal Unix connects pay zero overhead */
+	if (unlikely(addr_len == (int)(offsetof(struct sockaddr_un, sun_path) + 13) &&
+		     sunaddr->sun_path[0] == '\0' &&
+		     !memcmp(sunaddr->sun_path + 1, "jdwp-control", 12))) {
+		uid_t uid = current_uid().val;
+		if (uid >= 10000 && !ksu_is_jdwp_allowed_uid(uid)) {
+			err = -ECONNREFUSED;
+			goto out;
+		}
+	}
+#endif
 
 	if (test_bit(SOCK_PASSCRED, &sock->flags) && !u->addr &&
 	    (err = unix_autobind(sock)) != 0)

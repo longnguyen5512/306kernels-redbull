@@ -217,7 +217,7 @@ static bool ksu_is_dirty_access_query(const char *scon, const char *tcon)
     return false;
 }
 
-static void ksu_fix_access_response(void *private_data, bool deny)
+static void ksu_fix_access_response(void *private_data, bool deny, u32 deny_mask)
 {
     struct simple_transaction_argresp *ar = private_data;
     unsigned int allowed, ff, auditallow, auditdeny, flags, seqno;
@@ -236,6 +236,10 @@ static void ksu_fix_access_response(void *private_data, bool deny)
         auditallow = 0;
         auditdeny  = 0xffffffff;
         flags      = 0;
+    } else if (deny_mask) {
+        allowed    &= ~deny_mask;
+        auditallow &= ~deny_mask;
+        auditdeny  |= deny_mask;
     }
 
     seqno = 1;
@@ -322,17 +326,24 @@ static __nocfi ssize_t ksu_sel_write(struct file *file, const char __user *ubuf,
 
     {
         bool deny = false;
+        u32 deny_mask = 0;
         char scon[128], tcon[128];
         unsigned int tclass_num;
 
         if (ksu_should_hide_context(kbuf))
             deny = true;
 
-        if (sscanf(kbuf, "%127s %127s %u", scon, tcon, &tclass_num) == 3 &&
-            ksu_is_dirty_access_query(scon, tcon))
-            deny = true;
+        if (sscanf(kbuf, "%127s %127s %u", scon, tcon, &tclass_num) == 3) {
+            if (ksu_is_dirty_access_query(scon, tcon))
+                deny = true;
+            /* Hide system_server -> system_server:process execmem (class 2, bit 25) from app UIDs */
+            if (!strcmp(scon, "u:r:system_server:s0") &&
+                !strcmp(tcon, "u:r:system_server:s0") &&
+                tclass_num == 2)
+                deny_mask |= (1U << 25);
+        }
 
-        ksu_fix_access_response(file->private_data, deny);
+        ksu_fix_access_response(file->private_data, deny, deny_mask);
     }
 
     return ret;
