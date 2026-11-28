@@ -24,10 +24,6 @@
 extern int susfs_get_non_sus_mnt_id_from_mnt(struct mount *orig_mnt);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 
-#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-extern int susfs_open_redirect_spoof_seq_show(struct inode *inode, int *out_mnt_id, unsigned long *out_ino);
-#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
-
 static int seq_show(struct seq_file *m, void *v)
 {
 	struct files_struct *files = NULL;
