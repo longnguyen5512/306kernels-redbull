@@ -17,6 +17,7 @@ extern void susfs_spoof_uname(struct new_utsname *tmp);
 static int version_proc_show(struct seq_file *m, void *v)
 {
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+	/* Spoof /proc/version for app UIDs so detectors see stock clang/release strings */
 	if (current_uid().val >= 10000 &&
 	    static_branch_unlikely(&susfs_is_uname_spoof_buffer_set)) {
 		struct new_utsname tmp;

@@ -123,6 +123,7 @@
 
 #ifdef CONFIG_KSU_SUSFS
 static unsigned int jdwp_allow_uids[256];
+/* 0600 restricts /sys/module/unix/parameters/* from being world-readable by app UIDs */
 static int jdwp_allow_uids_count;
 module_param_array(jdwp_allow_uids, uint, &jdwp_allow_uids_count, 0600);
 
