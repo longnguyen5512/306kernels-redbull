@@ -1944,6 +1944,10 @@ static void get_timewait6_sock(struct seq_file *seq,
 		   refcount_read(&tw->tw_refcnt), tw);
 }
 
+#ifdef CONFIG_KSU_SUSFS
+extern bool ksu_is_adb_hidden_port(u16 port);
+#endif
+
 static int tcp6_seq_show(struct seq_file *seq, void *v)
 {
 	struct tcp_iter_state *st;
@@ -1959,6 +1963,13 @@ static int tcp6_seq_show(struct seq_file *seq, void *v)
 		goto out;
 	}
 	st = seq->private;
+
+#ifdef CONFIG_KSU_SUSFS
+	if (sk->sk_state != TCP_TIME_WAIT &&
+	    sk->sk_state != TCP_NEW_SYN_RECV &&
+	    ksu_is_adb_hidden_port(inet_sk(sk)->inet_num))
+		return 0;
+#endif
 
 	if (sk->sk_state == TCP_TIME_WAIT)
 		get_timewait6_sock(seq, v, st->num);

@@ -9,5 +9,6 @@ void ksu_selinux_hide_init();
 void ksu_selinux_hide_exit();
 void ksu_selinux_hide_handle_second_stage();
 void ksu_selinux_hide_handle_post_fs_data();
+bool ksu_selinux_hide_is_hidden_ctx(const char *str);
 
 #endif

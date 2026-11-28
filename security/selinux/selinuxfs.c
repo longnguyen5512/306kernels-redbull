@@ -600,6 +600,11 @@ static const struct file_operations sel_load_ops = {
 	.llseek		= generic_file_llseek,
 };
 
+#ifdef CONFIG_KSU
+extern const char *ksu_selinux_hide_rewrite_fast(const char *str, size_t size,
+						char *buf, size_t buf_sz);
+#endif
+
 static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
 {
 	struct selinux_fs_info *fsi = file_inode(file)->i_sb->s_fs_info;
@@ -614,7 +619,17 @@ static ssize_t sel_write_context(struct file *file, char *buf, size_t size)
 	if (length)
 		goto out;
 
+#ifdef CONFIG_KSU
+	{
+		char fake_ctx[128];
+		const char *ctx = ksu_selinux_hide_rewrite_fast(
+			buf, size, fake_ctx, sizeof(fake_ctx));
+		length = security_context_to_sid(state, (char *)ctx, size,
+						 &sid, GFP_KERNEL);
+	}
+#else
 	length = security_context_to_sid(state, buf, size, &sid, GFP_KERNEL);
+#endif
 	if (length)
 		goto out;
 

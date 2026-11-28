@@ -115,10 +115,30 @@ static inline struct hlist_head *mp_hash(struct dentry *dentry)
 
 static int mnt_alloc_id(struct mount *mnt)
 {
-	int res = ida_alloc(&mnt_id_ida, GFP_KERNEL);
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	unsigned int max_id = DEFAULT_KSU_MNT_ID - 1;
+#else
+	unsigned int max_id = INT_MAX;
+#endif
+	static unsigned int mnt_id_cursor;
+	unsigned int start = READ_ONCE(mnt_id_cursor);
+	int res;
 
+	/*
+	 * Advance monotonically so copy_mnt_ns() allocates contiguous IDs instead
+	 * of filling stale holes left between long-lived namespaces.
+	 */
+	res = ida_alloc_range(&mnt_id_ida, start, max_id, GFP_KERNEL);
+	if (res == -ENOSPC && start > 0) {
+		WRITE_ONCE(mnt_id_cursor, 0);
+		res = ida_alloc_range(&mnt_id_ida, 0, max_id, GFP_KERNEL);
+	}
 	if (res < 0)
 		return res;
+	if ((unsigned int)res < max_id)
+		WRITE_ONCE(mnt_id_cursor, (unsigned int)res + 1);
+	else
+		WRITE_ONCE(mnt_id_cursor, 0);
 	mnt->mnt_id = res;
 	return 0;
 }

@@ -2463,10 +2463,23 @@ static void get_timewait4_sock(const struct inet_timewait_sock *tw,
 
 #define TMPSZ 150
 
+#ifdef CONFIG_KSU_SUSFS
+extern bool ksu_is_adb_hidden_port(u16 port);
+#endif
+
 static int tcp4_seq_show(struct seq_file *seq, void *v)
 {
 	struct tcp_iter_state *st;
 	struct sock *sk = v;
+
+	if (v != SEQ_START_TOKEN) {
+#ifdef CONFIG_KSU_SUSFS
+		if (sk->sk_state != TCP_TIME_WAIT &&
+		    sk->sk_state != TCP_NEW_SYN_RECV &&
+		    ksu_is_adb_hidden_port(inet_sk(sk)->inet_num))
+			return 0;
+#endif
+	}
 
 	seq_setwidth(seq, TMPSZ - 1);
 	if (v == SEQ_START_TOKEN) {

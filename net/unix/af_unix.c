@@ -124,9 +124,12 @@
 #ifdef CONFIG_KSU_SUSFS
 static unsigned int jdwp_allow_uids[256];
 static int jdwp_allow_uids_count;
-module_param_array(jdwp_allow_uids, uint, &jdwp_allow_uids_count, 0644);
+module_param_array(jdwp_allow_uids, uint, &jdwp_allow_uids_count, 0600);
 
-static noinline bool ksu_is_jdwp_allowed_uid(uid_t uid)
+static unsigned int adb_tls_port;
+module_param(adb_tls_port, uint, 0600);
+
+bool ksu_is_jdwp_allowed_uid(uid_t uid)
 {
 	int count = READ_ONCE(jdwp_allow_uids_count);
 	int i;
@@ -140,6 +143,19 @@ static noinline bool ksu_is_jdwp_allowed_uid(uid_t uid)
 	}
 	return false;
 }
+EXPORT_SYMBOL_GPL(ksu_is_jdwp_allowed_uid);
+
+bool ksu_is_adb_hidden_port(u16 port)
+{
+	uid_t uid = current_uid().val;
+	unsigned int tls = READ_ONCE(adb_tls_port);
+
+	if (uid < 10000 || ksu_is_jdwp_allowed_uid(uid))
+		return false;
+
+	return (port == 5555) || (tls > 0 && port == (u16)tls);
+}
+EXPORT_SYMBOL_GPL(ksu_is_adb_hidden_port);
 #endif
 
 #include "scm.h"

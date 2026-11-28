@@ -6329,6 +6329,11 @@ bad:
 	return error;
 }
 
+#ifdef CONFIG_KSU
+extern const char *ksu_selinux_hide_rewrite_fast(const char *str, size_t size,
+						char *buf, size_t buf_sz);
+#endif
+
 static int selinux_setprocattr(const char *name, void *value, size_t size)
 {
 	struct task_security_struct *tsec;
@@ -6371,8 +6376,19 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
 			str[size-1] = 0;
 			size--;
 		}
+#ifdef CONFIG_KSU
+		{
+			char fake_ctx[128];
+			const char *ctx = ksu_selinux_hide_rewrite_fast(
+				value, size, fake_ctx, sizeof(fake_ctx));
+			error = security_context_to_sid(&selinux_state,
+							(char *)ctx, size,
+							&sid, GFP_KERNEL);
+		}
+#else
 		error = security_context_to_sid(&selinux_state, value, size,
 						&sid, GFP_KERNEL);
+#endif
 		if (error == -EINVAL && !strcmp(name, "fscreate")) {
 			if (!has_cap_mac_admin(true)) {
 				struct audit_buffer *ab;

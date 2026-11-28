@@ -21,6 +21,7 @@
 #include <linux/pkeys.h>
 #include <linux/mm_inline.h>
 #include <linux/ctype.h>
+#include <linux/cred.h>
 #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
 #include <linux/susfs_def.h>
 #endif // #if defined(CONFIG_KSU_SUSFS_SUS_KSTAT) || defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)
@@ -896,6 +897,17 @@ static int show_smap(struct seq_file *m, void *v)
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_MAP
 
 	smap_gather_stats(vma, &mss);
+
+	if (current_uid().val >= 10000 && vma->vm_file &&
+	    (vma->vm_flags & VM_EXEC) && !(vma->vm_flags & VM_WRITE) &&
+	    vma->vm_file->f_path.dentry &&
+	    !strcmp(vma->vm_file->f_path.dentry->d_name.name, "webview.apk")) {
+		mss.shared_clean += mss.shared_dirty;
+		mss.shared_dirty = 0;
+		mss.private_clean += mss.private_dirty;
+		mss.private_dirty = 0;
+		mss.anonymous = 0;
+	}
 
 	show_map_vma(m, vma);
 	if (vma_get_anon_name(vma)) {

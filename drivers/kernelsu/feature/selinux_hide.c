@@ -12,6 +12,7 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/kthread.h>
+#include <linux/delay.h>
 
 #include "policy/feature.h"
 #include "ksu.h"
@@ -26,6 +27,9 @@
 
 #ifdef KSU_COMPAT_USE_SELINUX_STATE
 extern struct selinux_state selinux_state;
+extern int security_context_to_sid(struct selinux_state *state,
+				   const char *scontext, u32 scontext_len,
+				   u32 *out_sid, gfp_t gfp);
 #define KSU_HAS_SELINUX_STATE 1
 #else
 #define KSU_HAS_SELINUX_STATE 0
@@ -47,7 +51,71 @@ struct ksu_hide_buf {
 
 static struct ksu_hide_buf __rcu *ksu_hide_type_list = NULL;
 static struct ksu_hide_buf __rcu *ksu_hide_rule_list = NULL;
+static u64 ksu_hide_type_bloom __read_mostly = 0;
 static DEFINE_MUTEX(ksu_hide_list_mutex);
+
+#define KSU_FAST_TYPE_SLOTS 256
+struct ksu_fast_type_slot {
+    u64 hash;
+    u64 hash2;
+    u8  len;
+    char name[31];
+};
+static struct ksu_fast_type_slot ksu_fast_types[KSU_FAST_TYPE_SLOTS];
+
+static inline u64 ksu_type_fnv64(const char *s, size_t len)
+{
+    u64 h = 14695981039346656037ULL;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        h ^= (u8)s[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static inline u64 ksu_type_fnv64_alt(const char *s, size_t len)
+{
+    u64 h = 0x9e3779b97f4a7c15ULL;
+    size_t i;
+
+    for (i = 0; i < len; i++) {
+        h ^= (u8)s[i];
+        h *= 0xbf58476d1ce4e5b9ULL;
+    }
+    return h;
+}
+
+static inline u64 ksu_type_bloom_mask(u64 h)
+{
+    return (1ULL << (h & 63)) | (1ULL << ((h >> 6) & 63));
+}
+
+static void ksu_fast_type_insert(const char *name, size_t len)
+{
+    u64 h = ksu_type_fnv64(name, len);
+    u64 h2 = ksu_type_fnv64_alt(name, len);
+    size_t idx = (size_t)(h & (KSU_FAST_TYPE_SLOTS - 1));
+    size_t step;
+
+    if (!len || len >= sizeof(ksu_fast_types[0].name))
+        return;
+
+    for (step = 0; step < KSU_FAST_TYPE_SLOTS; step++) {
+        struct ksu_fast_type_slot *s = &ksu_fast_types[(idx + step) & (KSU_FAST_TYPE_SLOTS - 1)];
+        if (s->len == 0) {
+            s->hash = h;
+            s->hash2 = h2;
+            memcpy(s->name, name, len);
+            s->name[len] = '\0';
+            smp_store_release(&s->len, (u8)len);
+            return;
+        }
+        if (s->len == len && s->hash == h && !memcmp(s->name, name, len))
+            return;
+    }
+}
 
 static void ksu_rcu_replace(struct ksu_hide_buf __rcu **slot, struct ksu_hide_buf *new_buf)
 {
@@ -90,6 +158,9 @@ void ksu_selinux_hide_add_type(const char *name)
     sprintf(new_buf->data + old_len, ":%s:", name);
 
     ksu_rcu_replace(&ksu_hide_type_list, new_buf);
+    ksu_fast_type_insert(name, name_len);
+    WRITE_ONCE(ksu_hide_type_bloom,
+               ksu_hide_type_bloom | ksu_type_bloom_mask(ksu_type_fnv64(name, name_len)));
     pr_info_ratelimited("selinux_hide: track type: :%s:\n", name);
 
 out:
@@ -191,6 +262,75 @@ static bool ksu_should_hide_context(const char *str)
     return false;
 }
 
+bool ksu_selinux_hide_is_hidden_ctx(const char *str)
+{
+    if (unlikely(!ksu_selinux_hide_enabled))
+        return false;
+    if (current_uid().val < 10000)
+        return false;
+    return ksu_should_hide_context(str);
+}
+
+const char *ksu_selinux_hide_rewrite_fast(const char *str, size_t size,
+                                          char *buf, size_t buf_sz)
+{
+    size_t i, type_off = 0, type_len = 0, idx;
+    int colons = 0;
+    bool hit = false;
+    u64 h, h2;
+
+    if (unlikely(!ksu_selinux_hide_enabled) || current_uid().val < 10000 ||
+        !str || !size || size >= buf_sz)
+        return str;
+
+    for (i = 0; i < size; i++) {
+        if (str[i] == ':') {
+            colons++;
+            if (colons == 2) {
+                type_off = i + 1;
+            } else if (colons == 3) {
+                type_len = i - type_off;
+                break;
+            }
+        }
+    }
+    if (!type_off)
+        return str;
+    if (!type_len)
+        type_len = size - type_off;
+    if (!type_len || type_len >= sizeof(ksu_fast_types[0].name))
+        return str;
+
+    h = ksu_type_fnv64(str + type_off, type_len);
+    h2 = ksu_type_fnv64_alt(str + type_off, type_len);
+    idx = (size_t)(h & (KSU_FAST_TYPE_SLOTS - 1));
+    {
+        const struct ksu_fast_type_slot *s0 = &ksu_fast_types[idx];
+        const struct ksu_fast_type_slot *s1 =
+            &ksu_fast_types[(idx + 1) & (KSU_FAST_TYPE_SLOTS - 1)];
+        u64 d0 = (u64)(READ_ONCE(s0->len) ^ (u8)type_len) |
+                 (READ_ONCE(s0->hash) ^ h) | (READ_ONCE(s0->hash2) ^ h2);
+        u64 d1 = (u64)(READ_ONCE(s1->len) ^ (u8)type_len) |
+                 (READ_ONCE(s1->hash) ^ h) | (READ_ONCE(s1->hash2) ^ h2);
+
+        hit = ((unsigned int)(d0 == 0) | (unsigned int)(d1 == 0)) != 0;
+    }
+
+    memcpy(buf, str, size);
+    buf[size] = '\0';
+    {
+        static const char tag[3] = { 'u', '4', 'i' };
+        size_t j;
+
+        /* Write branchlessly in-place so hit/miss paths touch the same cache line. */
+        for (j = 0; j < 3 && j < type_len; j++) {
+            char orig = buf[type_off + j];
+            WRITE_ONCE(buf[type_off + j], hit ? tag[j] : orig);
+        }
+    }
+    return buf;
+}
+
 struct ksu_dirty_rule {
     const char *scon;
     const char *tcon;
@@ -203,6 +343,8 @@ static const struct ksu_dirty_rule ksu_dirty_rules[] = {
     { "u:r:magisk:s0",        "u:r:droidspacesd:s0"         },
     { "u:r:su:s0",            "u:r:droidspacesd:s0"         },
     { "u:r:system_server:s0", "u:r:droidspacesd:s0"         },
+    { "u:r:kernel:s0",        "u:object_r:adb_data_file:s0" },
+    { "u:r:dex2oat:s0",       "u:object_r:dex2oat_exec:s0"  },
 };
 
 static bool ksu_is_dirty_access_query(const char *scon, const char *tcon)
@@ -312,13 +454,8 @@ static __nocfi ssize_t ksu_sel_write(struct file *file, const char __user *ubuf,
         goto passthrough;
     kbuf[len] = 0;
 
-    if (ino == KSU_SEL_CONTEXT_INO) {
-        if (ksu_should_hide_context(kbuf)) {
-            pr_info_ratelimited("selinux_hide: blocked context: %.40s\n", kbuf);
-            return -EINVAL;
-        }
+    if (ino == KSU_SEL_CONTEXT_INO)
         goto passthrough;
-    }
 
     ret = orig_sel_write(file, ubuf, size, pos);
     if (ret <= 0)
@@ -330,10 +467,11 @@ static __nocfi ssize_t ksu_sel_write(struct file *file, const char __user *ubuf,
         char scon[128], tcon[128];
         unsigned int tclass_num;
 
-        if (ksu_should_hide_context(kbuf))
-            deny = true;
-
         if (sscanf(kbuf, "%127s %127s %u", scon, tcon, &tclass_num) == 3) {
+            if (ksu_should_hide_context(scon) || ksu_should_hide_context(tcon)) {
+                pr_info_ratelimited("selinux_hide: blocked access context: %.40s\n", kbuf);
+                return -EINVAL;
+            }
             if (ksu_is_dirty_access_query(scon, tcon))
                 deny = true;
             /* Hide system_server -> system_server:process execmem (class 2, bit 25) from app UIDs */
@@ -376,6 +514,12 @@ static __nocfi ssize_t ksu_proc_pid_attr_write(struct file *file, const char __u
     kbuf[len] = '\0';
 
     if (ksu_should_hide_context(kbuf)) {
+#if KSU_HAS_SELINUX_STATE
+        u32 dummy_sid = 0;
+        static const char dummy_ctx[] = "u:r:ksu_nonexistent_sentinel:s0";
+        security_context_to_sid(&selinux_state, dummy_ctx,
+                                sizeof(dummy_ctx) - 1, &dummy_sid, GFP_KERNEL);
+#endif
         pr_info_ratelimited("selinux_hide: attr/current blocked: %.40s\n", kbuf);
         return -EINVAL;
     }
@@ -386,21 +530,7 @@ passthrough:
 
 static void ksu_hook_proc_attr_write(void)
 {
-    struct file_operations *fops;
-    int ret;
-
-    if (orig_proc_pid_attr_write)
-        return;
-
-    fops = ksu_resolve_fops("/proc/self/attr/current");
-    if (!fops || !fops->write)
-        return;
-
-    g_proc_attr_fops = fops;
-    orig_proc_pid_attr_write = fops->write;
-    ret = ksu_patch_fops_slot((void **)&fops->write, ksu_proc_pid_attr_write);
-    if (ret)
-        pr_warn("selinux_hide: proc_attr hook failed: %d\n", ret);
+    /* Handled directly inside selinux_setprocattr via ksu_selinux_hide_is_hidden_ctx */
 }
 
 static void ksu_hook_transaction_write(void)
@@ -535,6 +665,8 @@ static int ksu_selinux_hide_init_thread(void *data)
     ksu_selinux_hide_add_type("droidspaces");
     ksu_selinux_hide_add_type("lsposed_file");
     ksu_selinux_hide_add_type("xposed_data");
+    ksu_selinux_hide_add_type("xposed_file");
+    ksu_selinux_hide_add_type("adbroot");
     ksu_selinux_hide_add_type("msd_app");
     ksu_selinux_hide_add_type("msd_daemon");
 

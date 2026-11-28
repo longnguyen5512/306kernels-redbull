@@ -725,10 +725,38 @@ sock_error:
 }
 EXPORT_SYMBOL(__inet_stream_connect);
 
+#ifdef CONFIG_KSU_SUSFS
+extern bool ksu_is_adb_hidden_port(u16 port);
+#endif
+
 int inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			int addr_len, int flags)
 {
 	int err;
+
+#ifdef CONFIG_KSU_SUSFS
+	if (uaddr && addr_len >= sizeof(struct sockaddr_in)) {
+		u16 dport = 0;
+		bool is_local = false;
+
+		if (uaddr->sa_family == AF_INET) {
+			const struct sockaddr_in *sin = (const struct sockaddr_in *)uaddr;
+			dport = ntohs(sin->sin_port);
+			is_local = ipv4_is_loopback(sin->sin_addr.s_addr) ||
+				   ipv4_is_zeronet(sin->sin_addr.s_addr);
+		} else if (uaddr->sa_family == AF_INET6 &&
+			   addr_len >= sizeof(struct sockaddr_in6)) {
+			const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)uaddr;
+			dport = ntohs(sin6->sin6_port);
+			is_local = ipv6_addr_loopback(&sin6->sin6_addr) ||
+				   ipv6_addr_any(&sin6->sin6_addr) ||
+				   (ipv6_addr_v4mapped(&sin6->sin6_addr) &&
+				    ipv4_is_loopback(sin6->sin6_addr.s6_addr32[3]));
+		}
+		if (dport && (is_local || dport != 5555) && ksu_is_adb_hidden_port(dport))
+			return -ECONNREFUSED;
+	}
+#endif
 
 	lock_sock(sock->sk);
 	err = __inet_stream_connect(sock, uaddr, addr_len, flags, 0);

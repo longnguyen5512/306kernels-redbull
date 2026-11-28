@@ -53,6 +53,7 @@ void ksu_recheck_ksud(void)
 }
 
 extern void ksu_avc_spoof_late_init();
+extern void stop_init_rc_hook(void);
 
 void on_post_fs_data(void)
 {
@@ -70,6 +71,7 @@ void on_post_fs_data(void)
 	ksu_check_ksud();
 	pr_info("ksud %s\n", ksu_ksud_present ? "present" : "not installed");
 	// sanity check, this may influence the performance
+	stop_init_rc_hook();
 	ksu_stop_input_hook_runtime();
 	ksu_selinux_hide_handle_post_fs_data();
 }

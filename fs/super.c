@@ -36,6 +36,7 @@
 #include <linux/fsnotify.h>
 #include <linux/lockdep.h>
 #include <linux/user_namespace.h>
+#include <linux/nsproxy.h>
 #include <linux/fs_context.h>
 #ifdef CONFIG_KSU_SUSFS
 #include <linux/susfs_def.h>
@@ -1142,9 +1143,17 @@ int get_anon_bdev(dev_t *p)
 	/*
 	 * Many userspace utilities consider an FSID of 0 invalid.
 	 * Always return at least 1 from get_anon_bdev.
+	 * Isolate non-init mount namespace allocations to avoid leaving
+	 * apparent minor-number gaps between init-namespace mounts.
 	 */
-	dev = ida_alloc_range(&unnamed_dev_ida, 1, (1 << MINORBITS) - 1,
-			GFP_ATOMIC);
+	{
+		int min_dev = 1;
+		if (current->nsproxy && init_nsproxy.mnt_ns &&
+		    current->nsproxy->mnt_ns != init_nsproxy.mnt_ns)
+			min_dev = 1000;
+		dev = ida_alloc_range(&unnamed_dev_ida, min_dev,
+				(1 << MINORBITS) - 1, GFP_ATOMIC);
+	}
 	if (dev == -ENOSPC)
 		dev = -EMFILE;
 	if (dev < 0)
